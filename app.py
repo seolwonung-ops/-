@@ -44,7 +44,7 @@ def fetch_korean_investor_trading(code):
         "Referer": f"https://m.stock.naver.com/item/{clean_code}/trend"
     }
     records = []
-    url = f"https://m.stock.naver.com/api/stock/{clean_code}/trend?pageSize=80"
+    url = f"https://m.stock.naver.com/api/stock/{clean_code}/trend?pageSize=100"
     try:
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
@@ -120,7 +120,7 @@ def find_similar_patterns_outcome(full_df, target_date_str, has_sup):
         "min_return": float(np.min(similar_outcomes_20d))
     }
 
-# 4. 사이드바 - 종목 선택 및 편집 기능 복원
+# 4. 사이드바 구성
 DEFAULT_STOCKS = {
     "🇰🇷 삼성전자": "005930.KS",
     "🇰🇷 SK하이닉스": "000660.KS",
@@ -136,14 +136,20 @@ DEFAULT_STOCKS = {
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = DEFAULT_STOCKS.copy()
 
-st.sidebar.title("📌 종목 설정")
+st.sidebar.title("📌 종목 및 기간 설정")
 stock_options = list(st.session_state.watchlist.keys())
 selected_name = st.sidebar.selectbox("감시 종목 선택", stock_options)
 ticker = st.session_state.watchlist[selected_name]
 is_korean = ".KS" in ticker or ".KQ" in ticker
 unit = "원" if is_korean else "$"
 
-# ⚙️ 관심 종목 편집 (추가 / 삭제) 복원
+# 5년치 조회를 기본값으로 설정
+selected_period = st.sidebar.select_slider(
+    "조회 기간 선택",
+    options=["1y", "2y", "3y", "5y", "max"],
+    value="5y"
+)
+
 with st.sidebar.expander("⚙️ 관심 종목 편집 (추가 / 삭제)", expanded=False):
     st.markdown("**종목 추가**")
     new_name = st.text_input("종목명 (예: 에코프로, 구글)", key="add_name")
@@ -163,8 +169,8 @@ with st.sidebar.expander("⚙️ 관심 종목 편집 (추가 / 삭제)", expand
         else:
             st.error("최소 1개 이상의 종목은 남아있어야 합니다.")
 
-# 5. 데이터 로드 (2년치)
-df = yf.download(ticker, period="2y", progress=False)
+# 5. 데이터 다운로드 (선택 기간 전체)
+df = yf.download(ticker, period=selected_period, progress=False)
 if df.empty:
     st.error("데이터를 불러오지 못했습니다.")
     st.stop()
@@ -184,20 +190,17 @@ if is_korean:
         df['기관순매수'] = df['기관순매수'].fillna(0)
         has_supply = True
 
-# 차트용 130거래일 데이터
-plot_df = df.tail(130)
+st.title(f"📈 {selected_name} {selected_period.upper()} 종합 투자 타이밍 분석기")
 
-st.title(f"📈 {selected_name} 종합 AI 투자 타이밍 분석기")
-
-# 날짜 선택 슬라이더
-date_list = list(plot_df.index)
+# 날짜 선택 슬라이더 (5년치 전체 인덱스 지원)
+date_list = list(df.index)
 selected_date = st.select_slider(
-    "📅 분석 날짜 선택 (슬라이더를 움직여 특정 시점의 매수/보류/매도 가격과 통계를 확인하세요):",
+    "📅 분석 날짜 선택 (과거부터 현재까지 슬라이더를 움직여 당시 매매 기준 가격과 통계를 확인하세요):",
     options=date_list,
     value=date_list[-1]
 )
 
-# 6. 선택 날짜 기준 매수 / 보류 / 매도 기준 가격 계산
+# 6. 선택 날짜 기준 매매 기준 가격 계산
 target_row = df.loc[selected_date]
 target_date_formatted = datetime.strptime(selected_date, "%Y-%m-%d").strftime("%Y년 %m월 %d일")
 loc_idx = df.index.get_loc(selected_date)
@@ -205,9 +208,7 @@ loc_idx = df.index.get_loc(selected_date)
 sub_df = df.iloc[:loc_idx+1]
 window = min(len(sub_df), 20)
 
-# 매수 기준선 (20일 최고가)
 buy_price = float(sub_df['High'].iloc[-window:].max())
-# 매도/손절 기준선 (20일 최저가)
 stop_price = float(sub_df['Low'].iloc[-window:].min())
 
 c_close = float(target_row['Close'])
@@ -215,7 +216,7 @@ s20 = float(target_row['SMA20']) if not pd.isna(target_row['SMA20']) else c_clos
 s60 = float(target_row['SMA60']) if not pd.isna(target_row['SMA60']) else c_close
 rsi = float(target_row['RSI']) if not pd.isna(target_row['RSI']) else 50.0
 
-# 7. 차트 렌더링
+# 7. 차트 렌더링 (5년치 전체 데이터 표시)
 rows_cnt = 3 if has_supply else 2
 row_heights = [0.55, 0.20, 0.25] if has_supply else [0.70, 0.30]
 
@@ -226,36 +227,35 @@ fig = make_subplots(
 )
 
 fig.add_trace(go.Candlestick(
-    x=plot_df.index, open=plot_df['Open'], high=plot_df['High'], low=plot_df['Low'], close=plot_df['Close'],
+    x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
     increasing_line_color="#ef4444", decreasing_line_color="#3b82f6", name="주가"
 ), row=1, col=1)
-fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SMA20'], line=dict(color='#f59e0b', width=1.5), name="20일선"), row=1, col=1)
-fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SMA60'], line=dict(color='#10b981', width=1.5), name="60일선"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df.index, y=df['SMA20'], line=dict(color='#f59e0b', width=1.5), name="20일선"), row=1, col=1)
+fig.add_trace(go.Scatter(x=df.index, y=df['SMA60'], line=dict(color='#10b981', width=1.5), name="60일선"), row=1, col=1)
 
-# 매수선 / 매도선 점선 표시
 fig.add_hline(y=buy_price, line_dash="dash", line_color="#16a34a", line_width=1.5,
               annotation_text=f"▲ 매수가: {buy_price:,.0f}", row=1, col=1)
 fig.add_hline(y=stop_price, line_dash="dash", line_color="#dc2626", line_width=1.5,
               annotation_text=f"▼ 매도가: {stop_price:,.0f}", row=1, col=1)
 
-# 선택한 날짜 강조 수직선
+# 선택 날짜 보라색 수직선
 fig.add_vline(x=selected_date, line_width=2, line_dash="dot", line_color="#8b5cf6", row=1, col=1)
 
-fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['RSI'], line=dict(color='#8b5cf6', width=1.8), name="RSI"), row=2, col=1)
+fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#8b5cf6', width=1.8), name="RSI"), row=2, col=1)
 fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=2, col=1)
 fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=2, col=1)
 
 if has_supply:
-    fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['외국인순매수'], name="외국인", marker_color="#3b82f6"), row=3, col=1)
-    fig.add_trace(go.Bar(x=plot_df.index, y=plot_df['기관순매수'], name="기관", marker_color="#f97316"), row=3, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['외국인순매수'], name="외국인", marker_color="#3b82f6"), row=3, col=1)
+    fig.add_trace(go.Bar(x=df.index, y=df['기관순매수'], name="기관", marker_color="#f97316"), row=3, col=1)
 
-fig.update_xaxes(type='category', showticklabels=True, showgrid=True, gridcolor="#e2e8f0", showline=True, linewidth=1.5, linecolor="#475569", mirror=True, nticks=10)
+fig.update_xaxes(type='category', showticklabels=True, showgrid=True, gridcolor="#e2e8f0", showline=True, linewidth=1.5, linecolor="#475569", mirror=True, nticks=12)
 fig.update_yaxes(showgrid=True, gridcolor="#e2e8f0", showline=True, linewidth=1.5, linecolor="#475569", mirror=True)
 fig.update_layout(height=850 if has_supply else 680, margin=dict(l=15, r=15, t=35, b=25), xaxis_rangeslider_visible=False, plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", hovermode="x unified", legend=dict(orientation="h", y=1.03))
 
 st.plotly_chart(fig, use_container_width=True)
 
-# 8. 투자 판단 점수 및 추천 산출
+# 8. 투자 판단 알고리즘
 score = 50
 reasons = []
 
@@ -293,7 +293,6 @@ if has_supply:
         score += 10
         reasons.append(f"**기관이 +{i_net:,.0f}주 순매수**로 방어선을 구축 중입니다.")
 
-# 최종 추천 배너
 if score >= 75:
     verdict = "🟢 강력 매수 (STRONG BUY)"
     b_class = "banner-strong-buy"
@@ -322,7 +321,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 🎯 핵심: 매수 / 보류 / 매도 기준 가격 3단 카드
 fmt = "{:,.0f}" if is_korean else "{:,.2f}"
 
 st.markdown(f"### 🎯 [{target_date_formatted}] 기준 실전 매매 가격 가이드라인")
@@ -357,10 +355,10 @@ with c3:
     </div>
     """, unsafe_allow_html=True)
 
-# 과거 동일 조건 실측 백테스트 통계
+# 통계 백테스트
 stats = find_similar_patterns_outcome(df, selected_date, has_supply)
 if stats and stats['count'] > 0:
-    st.markdown("### 📊 과거 동일 조건 발생 시 실측 통계 (최근 2개년)")
+    st.markdown(f"### 📊 과거 동일 조건 발생 시 실측 통계 ({selected_period.upper()} 데이터 기준)")
     s1, s2, s3 = st.columns(3)
     with s1:
         st.markdown(f"""<div class="metric-box">
@@ -380,7 +378,7 @@ if stats and stats['count'] > 0:
             <div style="font-size: 1.4rem; font-weight: bold; color: {r_col}; margin-top: 4px;">{stats['avg_return']:+.2f}%</div>
         </div>""", unsafe_allow_html=True)
 
-# 당일 분석 상세 브리핑
+# 브리핑 요약
 st.markdown("### 📝 AI 시황 브리핑 요약")
 briefing_body = "<br>".join([f"• {r}" for r in reasons])
 st.markdown(f"""
