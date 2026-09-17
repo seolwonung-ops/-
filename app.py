@@ -187,7 +187,7 @@ c_close = float(target_row['Close'])
 ai_prob = float(target_row['AI_Win_Prob'])
 target_profit = buy_price * 1.08
 
-# 전일 대비 등락 계산
+# 전일 대비 안전 포맷팅 (에러 수정 지점)
 if loc_idx > 0:
     prev_close = float(df.iloc[loc_idx - 1]['Close'])
     day_diff = c_close - prev_close
@@ -195,6 +195,7 @@ if loc_idx > 0:
 else:
     day_diff, day_pct = 0.0, 0.0
 
+diff_str = f"{day_diff:+,.0f}" if is_korean else f"{day_diff:+,.2f}"
 fmt = "{:,.0f}" if is_korean else "{:,.2f}"
 
 # 6. 차트 렌더링
@@ -288,7 +289,7 @@ if vol_r >= 1.5:
 st.markdown("---")
 st.markdown(f"## 🤖 [{target_date_formatted}] 머신러닝 AI 진단 결과")
 
-# ⭐️ 요청 반영: 선택 날짜 당일 종가 카드 배치
+# 당일 종가 카드
 st.markdown(f"### 📌 [{target_date_formatted}] 당일 주가 현황")
 d1, d2, d3 = st.columns(3)
 with d1:
@@ -297,7 +298,7 @@ with d1:
         <div style="color: #64748b; font-size: 0.85rem;">당일 종가 (Close)</div>
         <div style="font-size: 1.6rem; font-weight: bold; color: #1e3a8a; margin: 4px 0;">{fmt.format(c_close)} {unit}</div>
         <div style="font-size: 0.85rem; color: {'#ef4444' if day_diff > 0 else '#3b82f6'};">
-            전일 대비: {day_diff:+,.0f if is_korean else day_diff:+,.2f} {unit} ({day_pct:+.2f}%)
+            전일 대비: {diff_str} {unit} ({day_pct:+.2f}%)
         </div>
     </div>""", unsafe_allow_html=True)
 with d2:
