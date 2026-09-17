@@ -26,10 +26,6 @@ st.markdown("""
     .banner-buy { background-color: #dcfce7; color: #15803d; border-left: 6px solid #16a34a; }
     .banner-hold { background-color: #fef3c7; color: #b45309; border-left: 6px solid #f59e0b; }
     .banner-sell { background-color: #fee2e2; color: #991b1b; border-left: 6px solid #ef4444; }
-    .briefing-box {
-        background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 10px;
-        padding: 14px 18px; font-size: 0.95rem; line-height: 1.6; margin-bottom: 16px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -73,7 +69,7 @@ def calculate_indicators(df):
     df['RSI'] = 100 - (100 / (1 + rs))
     return df
 
-# 3. 과거 유사 패턴 매칭 및 사후 성과 백테스트 엔진
+# 3. 과거 유사 패턴 백테스트 함수
 def find_similar_patterns_outcome(full_df, target_date_str, has_sup):
     idx_loc = full_df.index.get_loc(target_date_str)
     t_row = full_df.iloc[idx_loc]
@@ -88,15 +84,11 @@ def find_similar_patterns_outcome(full_df, target_date_str, has_sup):
 
     similar_outcomes_20d = []
     
-    # 과거 전체 봉을 스캔하며 유사 조건 탐색 (최소 20거래일 뒤 결과가 존재하는 봉)
     for i in range(20, len(full_df) - 20):
         if i == idx_loc:
             continue
         c_row = full_df.iloc[i]
-        
-        # 조건 1: RSI 오차범위 ±7
         rsi_match = abs(c_row['RSI'] - t_rsi) <= 7
-        # 조건 2: 20일선 대비 주가 위치 일치
         c_trend = 1 if c_row['Close'] >= c_row['SMA20'] else -1
         trend_match = (c_trend == t_trend)
         
@@ -117,17 +109,12 @@ def find_similar_patterns_outcome(full_df, target_date_str, has_sup):
         return None
 
     wins = [r for r in similar_outcomes_20d if r > 0]
-    win_rate = (len(wins) / len(similar_outcomes_20d)) * 100
-    avg_return = np.mean(similar_outcomes_20d)
-    max_return = np.max(similar_outcomes_20d)
-    min_return = np.min(similar_outcomes_20d)
-
     return {
         "count": len(similar_outcomes_20d),
-        "win_rate": win_rate,
-        "avg_return": avg_return,
-        "max_return": max_return,
-        "min_return": min_return
+        "win_rate": (len(wins) / len(similar_outcomes_20d)) * 100,
+        "avg_return": float(np.mean(similar_outcomes_20d)),
+        "max_return": float(np.max(similar_outcomes_20d)),
+        "min_return": float(np.min(similar_outcomes_20d))
     }
 
 # 4. 사이드바
@@ -152,7 +139,7 @@ ticker = st.session_state.watchlist[selected_name]
 is_korean = ".KS" in ticker or ".KQ" in ticker
 unit = "원" if is_korean else "$"
 
-# 5. 충분한 통계 표본을 위해 2년치 데이터 다운로드
+# 5. 데이터 로드
 df = yf.download(ticker, period="2y", progress=False)
 if df.empty:
     st.error("데이터를 불러오지 못했습니다.")
@@ -173,23 +160,26 @@ if is_korean:
         df['기관순매수'] = df['기관순매수'].fillna(0)
         has_supply = True
 
-# 차트에는 최근 130거래일(약 6개월)만 쾌적하게 렌더링
 plot_df = df.tail(130)
 
-buy_target = float(plot_df['High'].iloc[-20:].max())
-stop_target = float(plot_df['Low'].iloc[-20:].min())
+st.title(f"📈 {selected_name} 종합 투자 타이밍 분석기")
 
-st.title(f"📈 {selected_name} 과거 통계 기반 투자 타이밍 분석기")
-st.markdown("💡 **과거 캔들을 클릭하면, '그 당시와 똑같았던 과거 패턴들은 20영업일 뒤 어떻게 되었는가?'에 대한 실제 통계 승률과 현재 적용 가이드를 보여줍니다.**")
+# 6. 직접 날짜 이동 바 (클릭 오류 방지용)
+date_list = list(plot_df.index)
+selected_date_from_slider = st.select_slider(
+    "📅 분석하고 싶은 날짜를 직접 선택하세요 (슬라이더 이동 시 아래 분석표가 즉시 변경됩니다):",
+    options=date_list,
+    value=date_list[-1]
+)
 
-# 6. 차트 생성
+# 7. 차트 렌더링
 rows_cnt = 3 if has_supply else 2
 row_heights = [0.55, 0.20, 0.25] if has_supply else [0.70, 0.30]
 
 fig = make_subplots(
     rows=rows_cnt, cols=1, shared_xaxes=False, vertical_spacing=0.10,
     row_heights=row_heights,
-    subplot_titles=(["주가 및 매매 기준선", "RSI 지표 (과매수 70 / 과매도 30)", "외국인 / 기관 일별 순매수 수량 (주)"] if has_supply else ["주가 차트 및 매매 기준선", "RSI 지표"])
+    subplot_titles=(["주가 및 매매 기준선", "RSI 지표 (과매수 70 / 과매도 30)", "외국인 / 기관 일별 순매수 (주)"] if has_supply else ["주가 차트", "RSI 지표"])
 )
 
 fig.add_trace(go.Candlestick(
@@ -198,8 +188,9 @@ fig.add_trace(go.Candlestick(
 ), row=1, col=1)
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SMA20'], line=dict(color='#f59e0b', width=1.5), name="20일선"), row=1, col=1)
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SMA60'], line=dict(color='#10b981', width=1.5), name="60일선"), row=1, col=1)
-fig.add_hline(y=buy_target, line_dash="dash", line_color="#16a34a", line_width=1.5, annotation_text=f"▲ 매수가: {buy_target:,.0f}", row=1, col=1)
-fig.add_hline(y=stop_target, line_dash="dash", line_color="#dc2626", line_width=1.5, annotation_text=f"▼ 손절가: {stop_target:,.0f}", row=1, col=1)
+
+# 선택한 날짜 강조 수직선
+fig.add_vline(x=selected_date_from_slider, line_width=2, line_dash="dot", line_color="#8b5cf6", row=1, col=1)
 
 fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['RSI'], line=dict(color='#8b5cf6', width=1.8), name="RSI"), row=2, col=1)
 fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=2, col=1)
@@ -211,37 +202,35 @@ if has_supply:
 
 fig.update_xaxes(type='category', showticklabels=True, showgrid=True, gridcolor="#e2e8f0", showline=True, linewidth=1.5, linecolor="#475569", mirror=True, nticks=10)
 fig.update_yaxes(showgrid=True, gridcolor="#e2e8f0", showline=True, linewidth=1.5, linecolor="#475569", mirror=True)
-fig.update_layout(height=880 if has_supply else 700, margin=dict(l=15, r=15, t=35, b=25), xaxis_rangeslider_visible=False, plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", hovermode="x unified", legend=dict(orientation="h", y=1.03))
+fig.update_layout(height=850 if has_supply else 680, margin=dict(l=15, r=15, t=35, b=25), xaxis_rangeslider_visible=False, plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", hovermode="x unified", legend=dict(orientation="h", y=1.03))
 
-chart_event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode=["points"])
+st.plotly_chart(fig, use_container_width=True)
 
-# 7. 캔들 클릭 날짜 포착
-clicked_date_str = None
-if chart_event and chart_event.get("selection") and chart_event["selection"].get("points"):
-    clicked_point = chart_event["selection"]["points"][0]
-    raw_x = str(clicked_point.get("x", ""))
-    clicked_date_str = raw_x.split("T")[0].split(" ")[0].strip()
+# 8. 선택 일자 분석 계산
+target_date_str = selected_date_from_slider
+target_row = df.loc[target_date_str]
+target_date_formatted = datetime.strptime(target_date_str, "%Y-%m-%d").strftime("%Y년 %m월 %d일")
 
-if not clicked_date_str or clicked_date_str not in df.index:
-    clicked_date_str = plot_df.index[-1]
+loc_idx = df.index.get_loc(target_date_str)
+sub_df = df.iloc[:loc_idx+1]
+window = min(len(sub_df), 20)
 
-target_row = df.loc[clicked_date_str]
-target_date_formatted = datetime.strptime(clicked_date_str, "%Y-%m-%d").strftime("%Y년 %m월 %d일")
+calc_buy_target = float(sub_df['High'].iloc[-window:].max())
+calc_stop_target = float(sub_df['Low'].iloc[-window:].min())
+c_close = float(target_row['Close'])
+target_profit_price = calc_buy_target * 1.07 if c_close >= calc_buy_target else c_close * 1.08
 
-# 현재 최신 영업일 정보
 today_row = df.iloc[-1]
 today_date_formatted = datetime.strptime(df.index[-1], "%Y-%m-%d").strftime("%Y년 %m월 %d일")
 today_close = float(today_row['Close'])
-target_close = float(target_row['Close'])
-since_diff_pct = ((today_close - target_close) / target_close) * 100
+since_diff_pct = ((today_close - c_close) / c_close) * 100
 
-# 8. 과거 유사 패턴 사후 통계 계산
-stats = find_similar_patterns_outcome(df, clicked_date_str, has_supply)
+stats = find_similar_patterns_outcome(df, target_date_str, has_supply)
 
+# 9. 결과 출력
 st.markdown("---")
-st.markdown(f"## 📊 [{target_date_formatted}] 캔들 기준 과거 기록 매칭 분석")
+st.markdown(f"## 📊 [{target_date_formatted}] 기준 과거 기록 매칭 및 통계 분석")
 
-# 과거 통계 카드 3분할
 s1, s2, s3 = st.columns(3)
 if stats and stats['count'] > 0:
     with s1:
@@ -249,13 +238,13 @@ if stats and stats['count'] > 0:
         <div class="stat-card" style="border-top: 4px solid #3b82f6;">
             <div style="color: #64748b; font-size: 0.85rem;">과거 유사 패턴 발견 횟수</div>
             <div style="font-size: 1.6rem; font-weight: bold; color: #1e40af; margin: 6px 0;">{stats['count']} 회</div>
-            <div style="font-size: 0.8rem; color: #64748b;">최근 2년간 동일 조건 발생 표본</div>
+            <div style="font-size: 0.8rem; color: #64748b;">최근 2년간 동일 조건 표본</div>
         </div>""", unsafe_allow_html=True)
     with s2:
         win_color = "#16a34a" if stats['win_rate'] >= 60 else ("#dc2626" if stats['win_rate'] <= 40 else "#d97706")
         st.markdown(f"""
         <div class="stat-card" style="border-top: 4px solid {win_color};">
-            <div style="color: #64748b; font-size: 0.85rem;">20영업일(1개월) 뒤 상승 확률(승률)</div>
+            <div style="color: #64748b; font-size: 0.85rem;">20영업일 뒤 상승 확률(승률)</div>
             <div style="font-size: 1.6rem; font-weight: bold; color: {win_color}; margin: 6px 0;">{stats['win_rate']:.1f}%</div>
             <div style="font-size: 0.8rem; color: #64748b;">과거 유사 시점 매수 후 수익 확률</div>
         </div>""", unsafe_allow_html=True)
@@ -270,53 +259,43 @@ if stats and stats['count'] > 0:
 else:
     st.info("비교할 수 있는 충분한 과거 유사 패턴 표본이 부족합니다.")
 
-# 9. 현재 상황과의 비교 및 실전 매매 타이밍 조언
-st.markdown(f"### 🎯 지금 현재 시점({today_date_formatted})과의 비교 및 투자 커맨드")
-
 fmt = "{:,.0f}" if is_korean else "{:,.2f}"
 
-# 현재 포지션 진단
-c_now = today_close
-s20_now = today_row['SMA20']
-s60_now = today_row['SMA60']
-rsi_now = today_row['RSI']
-
-if stats and stats['win_rate'] >= 65 and stats['avg_return'] > 3.0:
-    verdict_text = "🟢 적극 매수 타이밍 (상승 확률 우세)"
-    banner_c = "banner-buy"
-    action_guide = f"선택하신 날({target_date_formatted})과 같은 조건은 과거 <b>상승 승률 {stats['win_rate']:.1f}%</b>를 기록한 강력한 패턴입니다. 현재 주가({fmt.format(c_now)}{unit}) 역시 해당 모멘텀의 영향권 내에 있다면 <b>신규 매수 또는 비중 확대</b>가 통계적으로 유리합니다."
-elif stats and stats['win_rate'] <= 40:
-    verdict_text = "🔴 매도 / 리스크 회피 타이밍 (하락 확률 우세)"
-    banner_c = "banner-sell"
-    action_guide = f"선택하신 날의 조건은 과거 20영업일 뒤 <b>하락 확률이 {100 - stats['win_rate']:.1f}%</b>로 손실 위험이 높았던 구간입니다. 현재 시점에서는 욕심을 내기보다 <b>비중 축소나 손절 기준가 엄수</b>가 필요합니다."
-else:
-    verdict_text = "🟡 매매 보류 / 관망 (방향성 중립)"
-    banner_c = "banner-hold"
-    action_guide = "과거 유사 사례에서 주가의 상승과 하락이 팽팽하게 엇갈렸던 자리입니다. 상단 저항선 돌파가 확인될 때까지 신규 진입을 미루는 것이 통계적으로 안전합니다."
-
-st.markdown(f"""
-<div class="signal-banner {banner_c}">
-    <div style="font-size: 1.25rem;">{verdict_text}</div>
-    <div style="margin-top: 6px; font-weight: normal; line-height: 1.6;">{action_guide}</div>
-</div>
-""", unsafe_allow_html=True)
-
-# 가격 비교 요약
-c_left, c_right = st.columns(2)
-with c_left:
-    st.markdown(f"""
-    <div class="metric-box">
-        <div style="color: #64748b; font-size: 0.85rem;">선택 날짜({target_date_formatted}) 당시 종가</div>
-        <div style="font-size: 1.4rem; font-weight: bold; margin-top: 4px;">{fmt.format(target_close)} {unit}</div>
-        <div style="font-size: 0.8rem; color: #64748b;">당시 RSI: {target_row['RSI']:.1f}</div>
+st.markdown(f"### 🎯 [{target_date_formatted}] 기준 추천 매매 제시 가격")
+p1, p2, p3 = st.columns(3)
+with p1:
+    st.markdown(f"""<div class="stat-card" style="border-top: 4px solid #16a34a;">
+        <div style="color: #16a34a; font-weight: bold; font-size: 0.9rem;">🟢 추천 돌파 매수가</div>
+        <div style="font-size: 1.4rem; font-weight: bold; color: #16a34a; margin: 4px 0;">{fmt.format(calc_buy_target)} {unit}</div>
+        <div style="font-size: 0.75rem; color: #64748b;">20일 저항선 돌파 시점</div>
+    </div>""", unsafe_allow_html=True)
+with p2:
+    st.markdown(f"""<div class="stat-card" style="border-top: 4px solid #2563eb;">
+        <div style="color: #2563eb; font-weight: bold; font-size: 0.9rem;">🎯 1차 익절 목표가</div>
+        <div style="font-size: 1.4rem; font-weight: bold; color: #2563eb; margin: 4px 0;">{fmt.format(target_profit_price)} {unit}</div>
+        <div style="font-size: 0.75rem; color: #64748b;">단기 분할 익절 목표선</div>
+    </div>""", unsafe_allow_html=True)
+with p3:
+    st.markdown(f"""<div class="stat-card" style="border-top: 4px solid #dc2626;">
+        <div style="color: #dc2626; font-weight: bold; font-size: 0.9rem;">🔴 추천 손절 기준가</div>
+        <div style="font-size: 1.4rem; font-weight: bold; color: #dc2626; margin: 4px 0;">{fmt.format(calc_stop_target)} {unit}</div>
+        <div style="font-size: 0.75rem; color: #64748b;">20일 지지선 이탈 시 손절</div>
     </div>""", unsafe_allow_html=True)
 
+# 현재 시점과 비교
+st.markdown(f"### ⏱️ 선택일({target_date_formatted}) vs 현재({today_date_formatted}) 비교")
+c_left, c_right = st.columns(2)
+with c_left:
+    st.markdown(f"""<div class="metric-box">
+        <div style="color: #64748b; font-size: 0.85rem;">선택 날짜 종가 및 RSI</div>
+        <div style="font-size: 1.3rem; font-weight: bold; margin-top: 4px;">{fmt.format(c_close)} {unit}</div>
+        <div style="font-size: 0.8rem; color: #64748b;">RSI: {target_row['RSI']:.1f}</div>
+    </div>""", unsafe_allow_html=True)
 with c_right:
-    st.markdown(f"""
-    <div class="metric-box">
-        <div style="color: #64748b; font-size: 0.85rem;">지금 현재({today_date_formatted}) 주가 및 수익률</div>
-        <div style="font-size: 1.4rem; font-weight: bold; margin-top: 4px; color: {'#ef4444' if since_diff_pct > 0 else '#3b82f6'};">
-            {fmt.format(c_now)} {unit} ({since_diff_pct:+.2f}%)
+    st.markdown(f"""<div class="metric-box">
+        <div style="color: #64748b; font-size: 0.85rem;">현재 종가 및 선택일 이후 변동률</div>
+        <div style="font-size: 1.3rem; font-weight: bold; margin-top: 4px; color: {'#ef4444' if since_diff_pct > 0 else '#3b82f6'};">
+            {fmt.format(today_close)} {unit} ({since_diff_pct:+.2f}%)
         </div>
-        <div style="font-size: 0.8rem; color: #64748b;">선택일 이후 현재까지의 누적 변동폭</div>
+        <div style="font-size: 0.8rem; color: #64748b;">선택 시점 이후 실측 누적 결과</div>
     </div>""", unsafe_allow_html=True)
