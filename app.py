@@ -70,14 +70,12 @@ def prepare_features(df, has_supply):
     data['SMA20'] = data['Close'].rolling(20).mean()
     data['SMA60'] = data['Close'].rolling(60).mean()
     
-    # RSI
     delta = data['Close'].diff()
     gain = delta.where(delta > 0, 0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     data['RSI'] = 100 - (100 / (1 + rs))
     
-    # 머신러닝 학습 지표
     data['Disparity_20'] = (data['Close'] / data['SMA20'] - 1) * 100
     data['Disparity_60'] = (data['Close'] / data['SMA60'] - 1) * 100
     data['Vol_Ratio'] = data['Volume'] / (data['Volume'].rolling(20).mean() + 1e-9)
@@ -175,13 +173,11 @@ st.title(f"🤖 {selected_name} AI 머신러닝 매매 플래너")
 date_list = list(df.index)
 selected_date = st.select_slider("📅 분석 날짜 선택:", options=date_list, value=date_list[-1])
 
-# ⭐️ 핵심: 선택된 날짜 기준 동적 가격 계산 (버그 수정)
+# 선택 날짜 데이터 추출 및 전일 대비 변동 계산
 loc_idx = df.index.get_loc(selected_date)
-# 선택한 날짜 직전 20거래일 윈도우 슬라이싱
 start_idx = max(0, loc_idx - 19)
 hist_window_df = df.iloc[start_idx : loc_idx + 1]
 
-# 선택 날짜 당시의 20일 최고가 및 최저가
 buy_price = float(hist_window_df['High'].max())
 stop_price = float(hist_window_df['Low'].min())
 
@@ -190,6 +186,16 @@ target_date_formatted = datetime.strptime(selected_date, "%Y-%m-%d").strftime("%
 c_close = float(target_row['Close'])
 ai_prob = float(target_row['AI_Win_Prob'])
 target_profit = buy_price * 1.08
+
+# 전일 대비 등락 계산
+if loc_idx > 0:
+    prev_close = float(df.iloc[loc_idx - 1]['Close'])
+    day_diff = c_close - prev_close
+    day_pct = (day_diff / prev_close) * 100
+else:
+    day_diff, day_pct = 0.0, 0.0
+
+fmt = "{:,.0f}" if is_korean else "{:,.2f}"
 
 # 6. 차트 렌더링
 fig = make_subplots(
@@ -205,14 +211,13 @@ fig.add_trace(go.Candlestick(
 fig.add_trace(go.Scatter(x=df.index, y=df['SMA20'], line=dict(color='#f59e0b', width=1.5), name="20일선"), row=1, col=1)
 fig.add_trace(go.Scatter(x=df.index, y=df['SMA60'], line=dict(color='#10b981', width=1.5), name="60일선"), row=1, col=1)
 
-# 선택 날짜 기준 매수가/손절가 점선 표시
 fig.add_hline(y=buy_price, line_dash="dash", line_color="#16a34a", line_width=1.5,
               annotation_text=f"▲ 돌파 매수가: {buy_price:,.0f}", row=1, col=1)
 fig.add_hline(y=stop_price, line_dash="dash", line_color="#dc2626", line_width=1.5,
               annotation_text=f"▼ 손절 기준가: {stop_price:,.0f}", row=1, col=1)
 fig.add_vline(x=selected_date, line_width=2, line_dash="dot", line_color="#8b5cf6", row=1, col=1)
 
-# AI 확률 그래프
+# AI 확률
 fig.add_trace(go.Scatter(x=df.index, y=df['AI_Win_Prob'], line=dict(color='#2563eb', width=1.8), name="AI 상승 확률"), row=2, col=1)
 fig.add_hline(y=60, line_dash="dash", line_color="#16a34a", annotation_text="상승 우세(60%)", row=2, col=1)
 fig.add_hline(y=40, line_dash="dash", line_color="#dc2626", annotation_text="하락 경계(40%)", row=2, col=1)
@@ -228,7 +233,7 @@ fig.update_layout(height=880, margin=dict(l=15, r=15, t=35, b=25), xaxis_rangesl
 
 st.plotly_chart(fig, use_container_width=True)
 
-# 7. AI 분석 판정 및 세부 진단 근거 도출
+# 7. AI 분석 판정 및 근거 도출
 if ai_prob >= 65:
     ai_verdict = "🟢 AI 적극 매수 제안 (STRONG BUY)"
     ai_banner = "banner-strong-buy"
@@ -246,22 +251,19 @@ else:
     ai_banner = "banner-hold"
     core_summary = f"상승 확률 <b>{ai_prob:.1f}%</b>로 상하방 모멘텀이 팽팽한 박스권입니다. 돌파 전까지 진입을 유보하세요."
 
-# 상세 이유 생성 (Feature Attribution)
 ai_reasons = []
 rsi_now = target_row['RSI']
 disp20 = target_row['Disparity_20']
 disp60 = target_row['Disparity_60']
 vol_r = target_row['Vol_Ratio']
 
-# RSI 근거
 if rsi_now <= 35:
-    ai_reasons.append(f"• **RSI 심리 지표({rsi_now:.1f}):** 바닥권(과매도) 영역으로, 과거 데이터상 기술적 반등 확률을 높이는 긍정적 요인으로 작용했습니다.")
+    ai_reasons.append(f"• **RSI 심리 지표({rsi_now:.1f}):** 바닥권(과매도) 영역으로 기술적 반등 확률을 높이는 긍정적 요인으로 작용했습니다.")
 elif rsi_now >= 68:
     ai_reasons.append(f"• **RSI 심리 지표({rsi_now:.1f}):** 과열권에 진입하여 단기 차익 실현 매물 출회 가능성을 높이는 하방 요인으로 반영되었습니다.")
 else:
     ai_reasons.append(f"• **RSI 심리 지표({rsi_now:.1f}):** 과열이나 침체 없는 중립 수준을 유지하고 있습니다.")
 
-# 이격도 근거
 if disp20 > 0 and disp60 > 0:
     ai_reasons.append(f"• **이평선 추세 배열:** 20일선 대비 {disp20:+.1f}%, 60일선 대비 {disp60:+.1f}%로 중장기 정배열 상승 궤도에 안착한 상태입니다.")
 elif disp20 < 0 and disp60 < 0:
@@ -269,24 +271,49 @@ elif disp20 < 0 and disp60 < 0:
 else:
     ai_reasons.append(f"• **이평선 추세 배열:** 20일선과 60일선 사이에 위치해 방향성 탐색 구간으로 인식되었습니다.")
 
-# 수급 근거 (국내 주식)
 if has_supply:
     fore5 = target_row.get('Fore_5d', 0)
     inst5 = target_row.get('Inst_5d', 0)
     if fore5 > 0 and inst5 > 0:
-        ai_reasons.append(f"• **메이저 수급 집중도:** 최근 5영업일간 외국인(+{fore5:,.0f}주)과 기관(+{inst5:,.0f}주)의 동반 순매수가 모델의 상승 확률을 크게 견인했습니다.")
+        ai_reasons.append(f"• **메이저 수급 집중도:** 최근 5영업일간 외국인(+{fore5:,.0f}주)과 기관(+{inst5:,.0f}주)의 동반 순매수가 모델의 상승 확률을 견인했습니다.")
     elif fore5 < 0 and inst5 < 0:
         ai_reasons.append(f"• **메이저 수급 집중도:** 최근 5영업일간 외국인({fore5:,.0f}주)과 기관({inst5:,.0f}주)의 쌍끌이 순매도로 수급 이탈이 감점 요인으로 반영되었습니다.")
     else:
         ai_reasons.append(f"• **메이저 수급 집중도:** 외국인({fore5:+,.0f}주)과 기관({inst5:+,.0f}주)의 수급이 엇갈려 혼조세를 보였습니다.")
 
-# 거래량 근거
 if vol_r >= 1.5:
     ai_reasons.append(f"• **거래량 에너지:** 20일 평균 대비 {vol_r:.1f}배의 대량 거래량이 실려 시장 모멘텀이 유입된 것으로 평가되었습니다.")
 
 # 8. 결과 렌더링
 st.markdown("---")
 st.markdown(f"## 🤖 [{target_date_formatted}] 머신러닝 AI 진단 결과")
+
+# ⭐️ 요청 반영: 선택 날짜 당일 종가 카드 배치
+st.markdown(f"### 📌 [{target_date_formatted}] 당일 주가 현황")
+d1, d2, d3 = st.columns(3)
+with d1:
+    st.markdown(f"""
+    <div class="metric-box" style="border-top: 4px solid #3b82f6;">
+        <div style="color: #64748b; font-size: 0.85rem;">당일 종가 (Close)</div>
+        <div style="font-size: 1.6rem; font-weight: bold; color: #1e3a8a; margin: 4px 0;">{fmt.format(c_close)} {unit}</div>
+        <div style="font-size: 0.85rem; color: {'#ef4444' if day_diff > 0 else '#3b82f6'};">
+            전일 대비: {day_diff:+,.0f if is_korean else day_diff:+,.2f} {unit} ({day_pct:+.2f}%)
+        </div>
+    </div>""", unsafe_allow_html=True)
+with d2:
+    st.markdown(f"""
+    <div class="metric-box">
+        <div style="color: #64748b; font-size: 0.85rem;">당일 시가 / 고가 / 저가</div>
+        <div style="font-size: 1.05rem; font-weight: bold; margin-top: 6px;">시: {fmt.format(target_row['Open'])} | 고: {fmt.format(target_row['High'])}</div>
+        <div style="font-size: 1.05rem; font-weight: bold; color: #3b82f6;">저: {fmt.format(target_row['Low'])} {unit}</div>
+    </div>""", unsafe_allow_html=True)
+with d3:
+    st.markdown(f"""
+    <div class="metric-box">
+        <div style="color: #64748b; font-size: 0.85rem;">20일 이평선 / RSI</div>
+        <div style="font-size: 1.05rem; font-weight: bold; margin-top: 6px;">20일선: {fmt.format(target_row['SMA20'])} {unit}</div>
+        <div style="font-size: 1.05rem; font-weight: bold; color: #8b5cf6;">RSI: {target_row['RSI']:.1f}</div>
+    </div>""", unsafe_allow_html=True)
 
 st.markdown(f"""
 <div class="signal-banner {ai_banner}">
@@ -295,7 +322,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 💡 AI가 왜 이 진단을 내렸는지 상세 브리핑 상자
+# AI 상세 브리핑
 st.markdown(f"### 📝 AI 진단 배경 및 세부 판단 근거")
 briefing_html = "<br>".join(ai_reasons)
 st.markdown(f"""
@@ -305,9 +332,8 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 날짜별 동적 가격 가이드라인 3분할 카드
-fmt = "{:,.0f}" if is_korean else "{:,.2f}"
-st.markdown(f"### 🎯 [{target_date_formatted}] AI 추천 매매 기준 가격")
+# AI 추천 매매 가격 카드
+st.markdown(f"### 🎯 [{target_date_formatted}] 기준 추천 매매 가격")
 c1, c2, c3 = st.columns(3)
 
 with c1:
