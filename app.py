@@ -15,7 +15,12 @@ st.markdown("""
 <style>
     .metric-box {
         background-color: #f8fafc; border-radius: 12px; padding: 14px;
-        border: 1px solid #e2e8f0; text-align: center; margin-bottom: 10px;
+        border: 1px solid #cbd5e1; text-align: center; margin-bottom: 10px;
+    }
+    .price-box {
+        background-color: #ffffff; border-radius: 10px; padding: 16px 14px;
+        text-align: center; margin-bottom: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.06);
+        border: 1px solid #e2e8f0;
     }
     .signal-banner {
         border-radius: 10px; padding: 14px 18px; margin: 12px 0; font-weight: bold;
@@ -29,14 +34,14 @@ st.markdown("""
         padding: 14px 18px; font-size: 0.95rem; line-height: 1.6; margin-bottom: 16px;
     }
     .news-card {
-        background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+        background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px;
         padding: 10px 14px; margin-bottom: 8px;
     }
     .news-title { font-weight: 600; font-size: 0.95rem; color: #1e40af; text-decoration: none; }
 </style>
 """, unsafe_allow_html=True)
 
-# 1. 네이버 모바일 API 수급 수집
+# 1. 네이버 모바일 API 수급 수집 (국내 주식 전용)
 @st.cache_data(ttl=300)
 def fetch_korean_investor_trading(code):
     clean_code = code.replace(".KS", "").replace(".KQ", "")
@@ -55,7 +60,7 @@ def fetch_korean_investor_trading(code):
                     biz_date = row.get("bizdate")
                     if not biz_date:
                         continue
-                    date = datetime.strptime(str(biz_date), "%Y%m%d")
+                    date = datetime.strptime(str(biz_date), "%Y%m%d").strftime("%Y-%m-%d")
                     fore_net = int(str(row.get("foreignerPureBuyQuant", 0)).replace(",", ""))
                     inst_net = int(str(row.get("organPureBuyQuant", 0)).replace(",", ""))
                     records.append({"Date": date, "외국인순매수": fore_net, "기관순매수": inst_net})
@@ -65,14 +70,14 @@ def fetch_korean_investor_trading(code):
         return pd.DataFrame(records).drop_duplicates("Date").set_index("Date").sort_index()
     return None
 
-# 2. 관련 뉴스 수집
+# 2. 관련 뉴스 수집 (국내 / 미국 공통)
 @st.cache_data(ttl=600)
 def fetch_stock_news(keyword):
     clean_keyword = keyword.replace("🇰🇷 ", "").replace("🇺🇸 ", "").split("(")[0].strip()
     encoded = urllib.parse.quote(clean_keyword)
     headers = {"User-Agent": "Mozilla/5.0"}
     news_items = []
-    url = f"https://news.google.com/rss/search?q={encoded}+주가+when:14d&hl=ko&gl=KR&ceid=KR:ko"
+    url = f"https://news.google.com/rss/search?q={encoded}+주식+when:14d&hl=ko&gl=KR&ceid=KR:ko"
     try:
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.content, "xml")
@@ -117,6 +122,7 @@ st.sidebar.title("📌 종목 선택")
 selected_name = st.sidebar.selectbox("감시 종목", list(st.session_state.watchlist.keys()))
 ticker = st.session_state.watchlist[selected_name]
 is_korean = ".KS" in ticker or ".KQ" in ticker
+unit = "원" if is_korean else "$"
 
 period = st.sidebar.select_slider("조회 기간", options=["3mo", "6mo", "1y"], value="6mo")
 
@@ -128,7 +134,7 @@ with st.sidebar.expander("⚙️ 관심 종목 편집", expanded=False):
             st.session_state.watchlist[n_name] = n_code.upper()
             st.rerun()
 
-# 5. 데이터 로드 및 결합
+# 5. 데이터 로드 및 타임존 완벽 정규화 (핵심 해결 포인트)
 df = yf.download(ticker, period=period, progress=False)
 if df.empty:
     st.error("데이터를 가져오지 못했습니다.")
@@ -137,39 +143,37 @@ if df.empty:
 if isinstance(df.columns, pd.MultiIndex):
     df.columns = df.columns.droplevel(1)
 
-df.index = pd.to_datetime(df.index).tz_localize(None).normalize()
+# 미국 주식의 UTC 시차 오차를 완전히 없애기 위해 'YYYY-MM-DD' 문자열 인덱스로 통일
+df.index = pd.to_datetime(df.index).strftime("%Y-%m-%d")
 df = calculate_indicators(df)
 
 has_supply = False
 if is_korean:
     df_supply = fetch_korean_investor_trading(ticker)
     if df_supply is not None and not df_supply.empty:
-        df_supply.index = pd.to_datetime(df_supply.index).tz_localize(None).normalize()
         df = df.join(df_supply, how="left")
         df['외국인순매수'] = df['외국인순매수'].fillna(0)
         df['기관순매수'] = df['기관순매수'].fillna(0)
         has_supply = True
 
-unit = "원" if is_korean else "$"
 buy_target = float(df['High'].iloc[-20:].max())
 stop_target = float(df['Low'].iloc[-20:].min())
 
-# 6. 상단 헤더
+# 6. 상단 안내
 st.title(f"📈 {selected_name} 종합 진단 리포트")
-st.markdown("💡 **차트의 특정 날짜 캔들을 클릭하면, 해당 일자의 상세 주가/수급 지표와 당시의 종합 투자 의견 리포트가 아래에 즉시 생성됩니다.**")
+st.markdown("💡 **국내 및 미국 주식 모두 캔들을 클릭하면 해당 일자의 매매 제시 가격과 종합 리포트가 아래에 즉시 열립니다.**")
 
-# 7. 차트 렌더링 (주가 차트 x축 바로 표시)
+# 7. 차트 렌더링
 rows_cnt = 3 if has_supply else 2
 row_heights = [0.55, 0.20, 0.25] if has_supply else [0.70, 0.30]
 
-# shared_xaxes=False로 변경하여 주가 차트 바로 밑에 날짜 눈금이 선명하게 뜨도록 설정
 fig = make_subplots(
     rows=rows_cnt, cols=1, shared_xaxes=False, vertical_spacing=0.10,
     row_heights=row_heights,
-    subplot_titles=(["주가 및 매매 기준선 (💡 캔들을 클릭해 보세요)", "RSI 지표 (과매수 70 / 과매도 30)", "외국인 / 기관 일별 순매수 수량 (주)"] if has_supply else ["주가 차트 (💡 캔들을 클릭해 보세요)", "RSI"])
+    subplot_titles=(["주가 및 매매 기준선", "RSI 지표 (과매수 70 / 과매도 30)", "외국인 / 기관 일별 순매수 수량 (주)"] if has_supply else ["주가 차트 및 매매 기준선 (💡 캔들을 클릭해 보세요)", "RSI 지표 (과매수 70 / 과매도 30)"])
 )
 
-# 1행: 주가 + 이평선 + 매매 기준선
+# 1행: 주가 캔들 + 이평선
 fig.add_trace(go.Candlestick(
     x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
     increasing_line_color="#ef4444", decreasing_line_color="#3b82f6", name="주가"
@@ -177,16 +181,16 @@ fig.add_trace(go.Candlestick(
 fig.add_trace(go.Scatter(x=df.index, y=df['SMA20'], line=dict(color='#f59e0b', width=1.5), name="20일선"), row=1, col=1)
 fig.add_trace(go.Scatter(x=df.index, y=df['SMA60'], line=dict(color='#10b981', width=1.5), name="60일선"), row=1, col=1)
 fig.add_hline(y=buy_target, line_dash="dash", line_color="#16a34a", line_width=1.5,
-              annotation_text=f"▲ 돌파 매수가: {buy_target:,.0f}", annotation_position="top right", row=1, col=1)
+              annotation_text=f"▲ 매수가: {buy_target:,.2f}", annotation_position="top right", row=1, col=1)
 fig.add_hline(y=stop_target, line_dash="dash", line_color="#dc2626", line_width=1.5,
-              annotation_text=f"▼ 이탈 손절가: {stop_target:,.0f}", annotation_position="bottom right", row=1, col=1)
+              annotation_text=f"▼ 손절가: {stop_target:,.2f}", annotation_position="bottom right", row=1, col=1)
 
 # 2행: RSI
-fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#8b5cf6', width=1.5), name="RSI"), row=2, col=1)
-fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
-fig.add_hline(y=30, line_dash="dash", line_color="blue", row=2, col=1)
+fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#8b5cf6', width=1.8), name="RSI"), row=2, col=1)
+fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", line_width=1.2, row=2, col=1)
+fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", line_width=1.2, row=2, col=1)
 
-# 3행: 수급
+# 3행: 수급 (국내 주식)
 if has_supply:
     def format_qty(val):
         if abs(val) >= 10000:
@@ -205,43 +209,55 @@ if has_supply:
         text=inst_texts, textposition='outside'
     ), row=3, col=1)
 
-# 모든 서브플롯 x축에 날짜가 선명하게 표시되도록 명시적 설정
+# 사각 테두리 및 눈금선 설정
 fig.update_xaxes(
-    type='date',
-    tickformat='%Y-%m-%d',
+    type='category',  # 문자열 인덱스를 완벽하게 매칭하기 위해 category 타입으로 설정
     showticklabels=True,
     showgrid=True,
-    gridcolor="#f1f5f9"
+    gridcolor="#e2e8f0",
+    showline=True,
+    linewidth=1.5,
+    linecolor="#475569",
+    mirror=True,
+    nticks=10
+)
+fig.update_yaxes(
+    showgrid=True,
+    gridcolor="#e2e8f0",
+    showline=True,
+    linewidth=1.5,
+    linecolor="#475569",
+    mirror=True
 )
 
 fig.update_layout(
-    height=880, margin=dict(l=10, r=10, t=30, b=20),
-    xaxis_rangeslider_visible=False, template="plotly_white",
-    hovermode="x unified", legend=dict(orientation="h", y=1.03)
+    height=900 if has_supply else 700,
+    margin=dict(l=15, r=15, t=35, b=25),
+    xaxis_rangeslider_visible=False,
+    plot_bgcolor="#ffffff",
+    paper_bgcolor="#ffffff",
+    hovermode="x unified",
+    legend=dict(orientation="h", y=1.03)
 )
 
-# 클릭 감지
 chart_event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode=["points"])
 
-# 8. 캔들 클릭 감지 및 해당 일자 데이터 추출
-clicked_date = None
+# 8. 캔들 클릭 감지 (국내/미국 주식 완벽 호환 파싱)
+clicked_date_str = None
 if chart_event and chart_event.get("selection") and chart_event["selection"].get("points"):
     clicked_point = chart_event["selection"]["points"][0]
-    clicked_date_str = str(clicked_point.get("x", "")).split("T")[0].split(" ")[0]
-    try:
-        clicked_date = pd.to_datetime(clicked_date_str)
-    except Exception:
-        pass
+    raw_x = str(clicked_point.get("x", ""))
+    # 2026-09-16T00:00:00 또는 2026-09-16 모두 YYYY-MM-DD 형태로 추출
+    clicked_date_str = raw_x.split("T")[0].split(" ")[0].strip()
 
-# 선택된 날짜가 없으면 가장 최근 영업일
-if clicked_date is None or clicked_date not in df.index:
-    clicked_date = df.index[-1]
+# 데이터프레임 인덱스에 존재하지 않으면 최신 날짜로 지정
+if not clicked_date_str or clicked_date_str not in df.index:
+    clicked_date_str = df.index[-1]
 
-target_row = df.loc[clicked_date]
-target_date_formatted = clicked_date.strftime("%Y년 %m월 %d일")
+target_row = df.loc[clicked_date_str]
+target_date_formatted = datetime.strptime(clicked_date_str, "%Y-%m-%d").strftime("%Y년 %m월 %d일")
 
-# 전일 대비 계산
-loc_idx = df.index.get_loc(clicked_date)
+loc_idx = df.index.get_loc(clicked_date_str)
 if loc_idx > 0:
     prev_row = df.iloc[loc_idx - 1]
     day_diff = target_row['Close'] - prev_row['Close']
@@ -249,11 +265,20 @@ if loc_idx > 0:
 else:
     day_diff, day_pct = 0, 0.0
 
-# 9. 클릭 일자 기준 실시간 종합 투자 분석 엔진
-c_close = target_row['Close']
-s20 = target_row['SMA20']
-s60 = target_row['SMA60']
-rsi = target_row['RSI']
+# 9. 해당 일자 기준 매매 제시 가격 계산
+sub_df = df.iloc[:loc_idx+1]
+window = min(len(sub_df), 20)
+
+calc_buy_target = float(sub_df['High'].iloc[-window:].max())
+calc_stop_target = float(sub_df['Low'].iloc[-window:].min())
+
+c_close = float(target_row['Close'])
+s20 = float(target_row['SMA20']) if not pd.isna(target_row['SMA20']) else c_close
+s60 = float(target_row['SMA60']) if not pd.isna(target_row['SMA60']) else c_close
+rsi = float(target_row['RSI']) if not pd.isna(target_row['RSI']) else 50.0
+
+# 1차 익절 목표가
+target_profit_price = calc_buy_target * 1.07 if c_close >= calc_buy_target else c_close * 1.08
 
 t_bull = c_close > s20 and s20 > s60
 t_bear = c_close < s20 and s20 < s60
@@ -277,29 +302,36 @@ elif rsi >= 70:
     date_score -= 15
     date_reasons.append(f"RSI 지표가 **{rsi:.1f}**로 과열권에 진입하여 차익 실현 매물 출회 가능성이 컸던 구간입니다.")
 else:
-    date_reasons.append(f"RSI는 **{rsi:.1f}**로 과열이나 침체 없이 안정적인 심리 상태를 나타냈습니다.")
+    date_reasons.append(f"RSI는 **{rsi:.1f}**로 안정적인 심리 상태를 나타냈습니다.")
 
 if has_supply:
     f_net = target_row.get('외국인순매수', 0)
     i_net = target_row.get('기관순매수', 0)
     if f_net > 0 and i_net > 0:
         date_score += 20
-        date_reasons.append(f"**외국인(+{f_net:,.0f}주)과 기관(+{i_net:,.0f}주)의 쌍끌이 순매수**가 유입되어 주가 상승 모멘텀을 형성했습니다.")
+        date_reasons.append(f"**외국인(+{f_net:,.0f}주)과 기관(+{i_net:,.0f}주)의 쌍끌이 순매수**가 유입되어 상승 모멘텀을 형성했습니다.")
     elif f_net < 0 and i_net < 0:
         date_score -= 20
-        date_reasons.append(f"**외국인({f_net:,.0f}주)과 기관({i_net:,.0f}주)의 동반 순매도**로 매물 부담이 강했던 날입니다.")
+        date_reasons.append(f"**외국인({f_net:,.0f}주)과 기관({i_net:,.0f}주)의 동반 순매도**로 매물 부담이 컸던 날입니다.")
     elif f_net > 0:
         date_score += 10
-        date_reasons.append(f"기관 매도 속에서도 **외국인이 +{f_net:,.0f}주 순매수**하며 하방을 지탱했습니다.")
+        date_reasons.append(f"**외국인이 +{f_net:,.0f}주 순매수**하며 하방을 지탱했습니다.")
     elif i_net > 0:
         date_score += 10
-        date_reasons.append(f"외국인 이탈 속에서 **국내 기관이 +{i_net:,.0f}주 순매수**로 방어선을 형성했습니다.")
+        date_reasons.append(f"**국내 기관이 +{i_net:,.0f}주 순매수**로 방어선을 형성했습니다.")
+else:
+    # 미국 주식: 거래량 급증 여부 분석
+    avg_vol = sub_df['Volume'].iloc[-20:].mean()
+    curr_vol = target_row['Volume']
+    if curr_vol > avg_vol * 1.5:
+        date_score += 10
+        date_reasons.append("평균 대비 **150% 이상의 대량 거래량**이 실리며 시장의 강한 관심을 입증했습니다.")
 
 # 종합 판정
 if date_score >= 75:
     date_verdict = "🟢 강력 매수 (STRONG BUY)"
     banner_cls = "banner-strong-buy"
-    date_action = "추세, 수급, 심리가 삼박자로 일치했던 구간입니다. 적극적 매수 진입 또는 비중 확대를 취하기 유리한 날이었습니다."
+    date_action = "추세, 수급, 심리가 삼박자로 일치했던 구간입니다. 적극적 매수 진입 또는 비중 확대를 취하기 유리한 시점이었습니다."
 elif date_score >= 60:
     date_verdict = "🟢 매수 고려 (BUY)"
     banner_cls = "banner-buy"
@@ -313,7 +345,7 @@ else:
     banner_cls = "banner-hold"
     date_action = "추세의 방향성이 불명확했던 혼조세였습니다. 돌파 또는 지지 확인 전까지 관망하는 것이 현명한 자리였습니다."
 
-# 10. 선택 날짜 상세 정보 & 종합 투자 의견 렌더링
+# 10. 선택 날짜 리포트 & 구체적 매매 가격 제시
 st.markdown("---")
 st.markdown(f"## 🔍 [{target_date_formatted}] 종합 상세 진단 및 투자 의견")
 
@@ -324,36 +356,84 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# 핵심 가격 & 수급 지표 4분할 카드
-k1, k2, k3, k4 = st.columns(4)
+# 실전 매매 가격 가이드 3분할 박스 (소수점 지원)
+st.markdown(f"### 🎯 [{target_date_formatted}] 기준 추천 매매(매수/매도) 가격")
+p1, p2, p3 = st.columns(3)
+
+fmt = "{:,.0f}" if is_korean else "{:,.2f}"
+
+with p1:
+    st.markdown(f"""
+    <div class="price-box" style="border-top: 4px solid #16a34a;">
+        <div style="color: #16a34a; font-weight: bold; font-size: 0.95rem;">🟢 추천 매수 기준가</div>
+        <div style="font-size: 1.5rem; font-weight: bold; color: #16a34a; margin: 6px 0;">{fmt.format(calc_buy_target)} {unit}</div>
+        <div style="font-size: 0.8rem; color: #64748b;">당시 직전 20일 저항선 상향 돌파 시 진입</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with p2:
+    st.markdown(f"""
+    <div class="price-box" style="border-top: 4px solid #2563eb;">
+        <div style="color: #2563eb; font-weight: bold; font-size: 0.95rem;">🎯 1차 목표(익절) 가격</div>
+        <div style="font-size: 1.5rem; font-weight: bold; color: #2563eb; margin: 6px 0;">{fmt.format(target_profit_price)} {unit}</div>
+        <div style="font-size: 0.8rem; color: #64748b;">매수가 돌파 후 단기 분할 익절 목표 구간</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with p3:
+    st.markdown(f"""
+    <div class="price-box" style="border-top: 4px solid #dc2626;">
+        <div style="color: #dc2626; font-weight: bold; font-size: 0.95rem;">🔴 추천 손절/이탈 매도가</div>
+        <div style="font-size: 1.5rem; font-weight: bold; color: #dc2626; margin: 6px 0;">{fmt.format(calc_stop_target)} {unit}</div>
+        <div style="font-size: 0.8rem; color: #64748b;">당시 직전 20일 최저 지지선 하향 이탈 시 전량 손절</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# 당일 세부 지표 카드
+if has_supply:
+    k1, k2, k3, k4 = st.columns(4)
+else:
+    k1, k2, k3 = st.columns(3)
+
 with k1:
     st.markdown(f"""<div class="metric-box">
         <div style="color: #64748b; font-size: 0.85rem;">종가 (전일 대비)</div>
-        <div style="font-size: 1.35rem; font-weight: bold; margin-top: 4px;">{c_close:,.0f} {unit}</div>
-        <div style="font-size: 0.85rem; color: {'#ef4444' if day_diff > 0 else '#3b82f6'};">({day_diff:+,.0f} / {day_pct:+.2f}%)</div>
+        <div style="font-size: 1.35rem; font-weight: bold; margin-top: 4px;">{fmt.format(c_close)} {unit}</div>
+        <div style="font-size: 0.85rem; color: {'#ef4444' if day_diff > 0 else '#3b82f6'};">({day_diff:+,.2f} / {day_pct:+.2f}%)</div>
     </div>""", unsafe_allow_html=True)
+
 with k2:
     st.markdown(f"""<div class="metric-box">
         <div style="color: #64748b; font-size: 0.85rem;">시가 / 고가 / 저가</div>
-        <div style="font-size: 0.95rem; font-weight: bold; margin-top: 6px;">시: {target_row['Open']:,.0f} | 고: {target_row['High']:,.0f}</div>
-        <div style="font-size: 0.95rem; font-weight: bold; color: #3b82f6;">저: {target_row['Low']:,.0f} {unit}</div>
+        <div style="font-size: 0.95rem; font-weight: bold; margin-top: 6px;">시: {fmt.format(target_row['Open'])} | 고: {fmt.format(target_row['High'])}</div>
+        <div style="font-size: 0.95rem; font-weight: bold; color: #3b82f6;">저: {fmt.format(target_row['Low'])} {unit}</div>
     </div>""", unsafe_allow_html=True)
-with k3:
-    f_qty = target_row.get('외국인순매수', 0) if has_supply else 0
-    f_col = "#3b82f6" if f_qty >= 0 else "#ef4444"
-    st.markdown(f"""<div class="metric-box">
-        <div style="color: #64748b; font-size: 0.85rem;">외국인 순매매</div>
-        <div style="font-size: 1.35rem; font-weight: bold; color: {f_col}; margin-top: 4px;">{f_qty:+,.0f} 주</div>
-        <div style="font-size: 0.8rem; color: #64748b;">당일 집계 기준</div>
-    </div>""", unsafe_allow_html=True)
-with k4:
-    i_qty = target_row.get('기관순매수', 0) if has_supply else 0
-    i_col = "#f97316" if i_qty >= 0 else "#ef4444"
-    st.markdown(f"""<div class="metric-box">
-        <div style="color: #64748b; font-size: 0.85rem;">기관 순매매</div>
-        <div style="font-size: 1.35rem; font-weight: bold; color: {i_col}; margin-top: 4px;">{i_qty:+,.0f} 주</div>
-        <div style="font-size: 0.8rem; color: #64748b;">당일 집계 기준</div>
-    </div>""", unsafe_allow_html=True)
+
+if has_supply:
+    with k3:
+        f_qty = target_row.get('외국인순매수', 0)
+        f_col = "#3b82f6" if f_qty >= 0 else "#ef4444"
+        st.markdown(f"""<div class="metric-box">
+            <div style="color: #64748b; font-size: 0.85rem;">외국인 순매매</div>
+            <div style="font-size: 1.35rem; font-weight: bold; color: {f_col}; margin-top: 4px;">{f_qty:+,.0f} 주</div>
+            <div style="font-size: 0.8rem; color: #64748b;">당일 집계 기준</div>
+        </div>""", unsafe_allow_html=True)
+    with k4:
+        i_qty = target_row.get('기관순매수', 0)
+        i_col = "#f97316" if i_qty >= 0 else "#ef4444"
+        st.markdown(f"""<div class="metric-box">
+            <div style="color: #64748b; font-size: 0.85rem;">기관 순매매</div>
+            <div style="font-size: 1.35rem; font-weight: bold; color: {i_col}; margin-top: 4px;">{i_qty:+,.0f} 주</div>
+            <div style="font-size: 0.8rem; color: #64748b;">당일 집계 기준</div>
+        </div>""", unsafe_allow_html=True)
+else:
+    with k3:
+        v_qty = target_row['Volume']
+        st.markdown(f"""<div class="metric-box">
+            <div style="color: #64748b; font-size: 0.85rem;">당일 총 거래량</div>
+            <div style="font-size: 1.35rem; font-weight: bold; margin-top: 4px;">{v_qty:,.0f} 주</div>
+            <div style="font-size: 0.8rem; color: #64748b;">미국 거래소 집계</div>
+        </div>""", unsafe_allow_html=True)
 
 # 당일 분석 브리핑
 st.markdown(f"### 📝 [{target_date_formatted}] AI 심층 분석 요약")
