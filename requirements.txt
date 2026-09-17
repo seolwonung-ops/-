@@ -2,3 +2,5 @@ streamlit
 yfinance
 plotly
 pandas
+requests
+beautifulsoup4
