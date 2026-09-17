@@ -5,10 +5,10 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
-from bs4 import BeautifulSoup
 from datetime import datetime
+from sklearn.ensemble import RandomForestClassifier
 
-st.set_page_config(page_title="AI 종합 주식 매매 분석기", page_icon="📈", layout="wide")
+st.set_page_config(page_title="AI 머신러닝 주식 매매 시스템", page_icon="📈", layout="wide")
 
 st.markdown("""
 <style>
@@ -22,7 +22,7 @@ st.markdown("""
         border: 1px solid #e2e8f0;
     }
     .signal-banner {
-        border-radius: 10px; padding: 14px 18px; margin: 12px 0; font-weight: bold;
+        border-radius: 10px; padding: 16px 20px; margin: 12px 0; font-weight: bold;
     }
     .banner-strong-buy { background-color: #dcfce7; color: #15803d; border-left: 6px solid #16a34a; }
     .banner-buy { background-color: #f0fdf4; color: #166534; border-left: 6px solid #22c55e; }
@@ -35,7 +35,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 1. 네이버 모바일 API 수급 수집
+# 1. 수급 데이터 수집
 @st.cache_data(ttl=300)
 def fetch_korean_investor_trading(code):
     clean_code = code.replace(".KS", "").replace(".KQ", "")
@@ -64,63 +64,59 @@ def fetch_korean_investor_trading(code):
         return pd.DataFrame(records).drop_duplicates("Date").set_index("Date").sort_index()
     return None
 
-# 2. 기술 지표 계산
-def calculate_indicators(df):
-    df['SMA20'] = df['Close'].rolling(window=20).mean()
-    df['SMA60'] = df['Close'].rolling(window=60).mean()
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+# 2. 피처 엔지니어링 (AI 학습용 지표 생성)
+def prepare_features(df, has_supply):
+    data = df.copy()
+    data['SMA20'] = data['Close'].rolling(20).mean()
+    data['SMA60'] = data['Close'].rolling(60).mean()
+    
+    # RSI (14)
+    delta = data['Close'].diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
-    df['RSI'] = 100 - (100 / (1 + rs))
-    return df
+    data['RSI'] = 100 - (100 / (1 + rs))
+    
+    # 머신러닝 입력 특성
+    data['Disparity_20'] = (data['Close'] / data['SMA20'] - 1) * 100
+    data['Disparity_60'] = (data['Close'] / data['SMA60'] - 1) * 100
+    data['Vol_Ratio'] = data['Volume'] / (data['Volume'].rolling(20).mean() + 1e-9)
+    data['Volatility_20'] = data['Close'].pct_change().rolling(20).std() * 100
 
-# 3. 과거 유사 패턴 사후 통계 백테스트 엔진
-def find_similar_patterns_outcome(full_df, target_date_str, has_sup):
-    idx_loc = full_df.index.get_loc(target_date_str)
-    t_row = full_df.iloc[idx_loc]
-    t_rsi = t_row['RSI']
-    t_trend = 1 if t_row['Close'] >= t_row['SMA20'] else -1
-    t_sup = 0
-    if has_sup:
-        f_val = t_row.get('외국인순매수', 0)
-        i_val = t_row.get('기관순매수', 0)
-        t_sup = 1 if (f_val > 0 or i_val > 0) else -1
+    feature_cols = ['RSI', 'Disparity_20', 'Disparity_60', 'Vol_Ratio', 'Volatility_20']
+    
+    if has_supply:
+        data['Fore_5d'] = data['외국인순매수'].rolling(5).sum()
+        data['Inst_5d'] = data['기관순매수'].rolling(5).sum()
+        feature_cols.extend(['Fore_5d', 'Inst_5d'])
+        
+    return data, feature_cols
 
-    similar_outcomes_20d = []
-    for i in range(20, len(full_df) - 20):
-        if i == idx_loc:
-            continue
-        c_row = full_df.iloc[i]
-        rsi_match = abs(c_row['RSI'] - t_rsi) <= 7
-        c_trend = 1 if c_row['Close'] >= c_row['SMA20'] else -1
-        trend_match = (c_trend == t_trend)
-        sup_match = True
-        if has_sup:
-            c_f = c_row.get('외국인순매수', 0)
-            c_i = c_row.get('기관순매수', 0)
-            c_sup = 1 if (c_f > 0 or c_i > 0) else -1
-            sup_match = (c_sup == t_sup)
-            
-        if rsi_match and trend_match and sup_match:
-            base_p = c_row['Close']
-            after_20d_p = full_df.iloc[i + 20]['Close']
-            pct_return = ((after_20d_p - base_p) / base_p) * 100
-            similar_outcomes_20d.append(pct_return)
+# 3. AI 머신러닝 학습 및 확률 추론 엔진
+@st.cache_resource(ttl=3600)
+def train_and_predict_ai(df_clean, feature_cols):
+    # 정답 라벨링: 향후 20영업일 뒤 주가가 +3% 이상 유의미하게 상승했는가? (1: 상승, 0: 횡보/하락)
+    df_clean['Target_20d_Return'] = (df_clean['Close'].shift(-20) - df_clean['Close']) / df_clean['Close']
+    df_clean['Label'] = (df_clean['Target_20d_Return'] >= 0.03).astype(int)
 
-    if not similar_outcomes_20d:
-        return None
+    # 훈련셋: 20일 뒤 결과를 알 수 있는 과거 데이터
+    train_mask = df_clean['Target_20d_Return'].notna()
+    X_train = df_clean.loc[train_mask, feature_cols].fillna(0)
+    y_train = df_clean.loc[train_mask, 'Label']
 
-    wins = [r for r in similar_outcomes_20d if r > 0]
-    return {
-        "count": len(similar_outcomes_20d),
-        "win_rate": (len(wins) / len(similar_outcomes_20d)) * 100,
-        "avg_return": float(np.mean(similar_outcomes_20d)),
-        "max_return": float(np.max(similar_outcomes_20d)),
-        "min_return": float(np.min(similar_outcomes_20d))
-    }
+    # AI 모델 구축 (랜덤 포레스트)
+    model = RandomForestClassifier(n_estimators=100, max_depth=5, min_samples_leaf=3, random_state=42)
+    model.fit(X_train, y_train)
 
-# 4. 사이드바 구성
+    # 전체 기간에 대한 AI 상승 예측 확률 계산
+    all_X = df_clean[feature_cols].fillna(0)
+    proba_up = model.predict_proba(all_X)[:, 1] * 100
+    
+    # 중요하게 본 지표 가중치
+    importances = dict(zip(feature_cols, model.feature_importances_))
+    return proba_up, importances
+
+# 4. 사이드바 종목 설정
 DEFAULT_STOCKS = {
     "🇰🇷 삼성전자": "005930.KS",
     "🇰🇷 SK하이닉스": "000660.KS",
@@ -137,49 +133,35 @@ if "watchlist" not in st.session_state:
     st.session_state.watchlist = DEFAULT_STOCKS.copy()
 
 st.sidebar.title("📌 종목 및 기간 설정")
-stock_options = list(st.session_state.watchlist.keys())
-selected_name = st.sidebar.selectbox("감시 종목 선택", stock_options)
+selected_name = st.sidebar.selectbox("감시 종목", list(st.session_state.watchlist.keys()))
 ticker = st.session_state.watchlist[selected_name]
 is_korean = ".KS" in ticker or ".KQ" in ticker
 unit = "원" if is_korean else "$"
 
-# 5년치 조회를 기본값으로 설정
-selected_period = st.sidebar.select_slider(
-    "조회 기간 선택",
-    options=["1y", "2y", "3y", "5y", "max"],
-    value="5y"
-)
+selected_period = st.sidebar.select_slider("데이터 수집 기간", options=["2y", "3y", "5y", "max"], value="5y")
 
 with st.sidebar.expander("⚙️ 관심 종목 편집 (추가 / 삭제)", expanded=False):
-    st.markdown("**종목 추가**")
-    new_name = st.text_input("종목명 (예: 에코프로, 구글)", key="add_name")
-    new_code = st.text_input("티커 심볼 (예: 086520.KQ, GOOGL)", key="add_code")
+    new_name = st.text_input("종목명 (예: 에코프로, 구글)")
+    new_code = st.text_input("티커 심볼 (예: 086520.KQ, GOOGL)")
     if st.button("➕ 종목 추가", use_container_width=True):
         if new_name.strip() and new_code.strip():
             st.session_state.watchlist[new_name.strip()] = new_code.strip().upper()
-            st.success(f"'{new_name}' 추가 완료!")
             st.rerun()
-    st.markdown("---")
-    st.markdown("**선택 종목 삭제**")
     if st.button(f"🗑️ '{selected_name}' 삭제", use_container_width=True):
         if len(st.session_state.watchlist) > 1:
             del st.session_state.watchlist[selected_name]
-            st.success(f"'{selected_name}' 삭제 완료!")
             st.rerun()
-        else:
-            st.error("최소 1개 이상의 종목은 남아있어야 합니다.")
 
-# 5. 데이터 다운로드 (선택 기간 전체)
+# 5. 데이터 로드 및 AI 연산
 df = yf.download(ticker, period=selected_period, progress=False)
 if df.empty:
-    st.error("데이터를 불러오지 못했습니다.")
+    st.error("데이터를 가져오지 못했습니다.")
     st.stop()
 
 if isinstance(df.columns, pd.MultiIndex):
     df.columns = df.columns.droplevel(1)
 
 df.index = pd.to_datetime(df.index).strftime("%Y-%m-%d")
-df = calculate_indicators(df)
 
 has_supply = False
 if is_korean:
@@ -190,40 +172,32 @@ if is_korean:
         df['기관순매수'] = df['기관순매수'].fillna(0)
         has_supply = True
 
-st.title(f"📈 {selected_name} {selected_period.upper()} 종합 투자 타이밍 분석기")
+df, feature_cols = prepare_features(df, has_supply)
+proba_series, feature_weights = train_and_predict_ai(df, feature_cols)
+df['AI_Win_Prob'] = proba_series
 
-# 날짜 선택 슬라이더 (5년치 전체 인덱스 지원)
+st.title(f"🤖 {selected_name} AI 머신러닝 매매 플래너")
+
 date_list = list(df.index)
-selected_date = st.select_slider(
-    "📅 분석 날짜 선택 (과거부터 현재까지 슬라이더를 움직여 당시 매매 기준 가격과 통계를 확인하세요):",
-    options=date_list,
-    value=date_list[-1]
-)
+selected_date = st.select_slider("📅 분석 날짜 선택:", options=date_list, value=date_list[-1])
 
-# 6. 선택 날짜 기준 매매 기준 가격 계산
 target_row = df.loc[selected_date]
 target_date_formatted = datetime.strptime(selected_date, "%Y-%m-%d").strftime("%Y년 %m월 %d일")
 loc_idx = df.index.get_loc(selected_date)
 
 sub_df = df.iloc[:loc_idx+1]
 window = min(len(sub_df), 20)
-
 buy_price = float(sub_df['High'].iloc[-window:].max())
 stop_price = float(sub_df['Low'].iloc[-window:].min())
 
 c_close = float(target_row['Close'])
-s20 = float(target_row['SMA20']) if not pd.isna(target_row['SMA20']) else c_close
-s60 = float(target_row['SMA60']) if not pd.isna(target_row['SMA60']) else c_close
-rsi = float(target_row['RSI']) if not pd.isna(target_row['RSI']) else 50.0
+ai_prob = float(target_row['AI_Win_Prob'])
 
-# 7. 차트 렌더링 (5년치 전체 데이터 표시)
-rows_cnt = 3 if has_supply else 2
-row_heights = [0.55, 0.20, 0.25] if has_supply else [0.70, 0.30]
-
+# 6. 차트 렌더링 (AI 예측 확률 서브플롯 추가)
 fig = make_subplots(
-    rows=rows_cnt, cols=1, shared_xaxes=False, vertical_spacing=0.10,
-    row_heights=row_heights,
-    subplot_titles=(["주가 및 매매 기준선", "RSI 지표 (과매수 70 / 과매도 30)", "외국인 / 기관 일별 순매수 (주)"] if has_supply else ["주가 차트", "RSI 지표"])
+    rows=3, cols=1, shared_xaxes=False, vertical_spacing=0.08,
+    row_heights=[0.55, 0.23, 0.22],
+    subplot_titles=(["주가 및 매매 기준선", "AI 모델 추정 20일 뒤 상승 확률 (%)", "RSI 지표"])
 )
 
 fig.add_trace(go.Candlestick(
@@ -232,158 +206,94 @@ fig.add_trace(go.Candlestick(
 ), row=1, col=1)
 fig.add_trace(go.Scatter(x=df.index, y=df['SMA20'], line=dict(color='#f59e0b', width=1.5), name="20일선"), row=1, col=1)
 fig.add_trace(go.Scatter(x=df.index, y=df['SMA60'], line=dict(color='#10b981', width=1.5), name="60일선"), row=1, col=1)
-
-fig.add_hline(y=buy_price, line_dash="dash", line_color="#16a34a", line_width=1.5,
-              annotation_text=f"▲ 매수가: {buy_price:,.0f}", row=1, col=1)
-fig.add_hline(y=stop_price, line_dash="dash", line_color="#dc2626", line_width=1.5,
-              annotation_text=f"▼ 매도가: {stop_price:,.0f}", row=1, col=1)
-
-# 선택 날짜 보라색 수직선
+fig.add_hline(y=buy_price, line_dash="dash", line_color="#16a34a", line_width=1.5, annotation_text=f"▲ 매수가: {buy_price:,.0f}", row=1, col=1)
+fig.add_hline(y=stop_price, line_dash="dash", line_color="#dc2626", line_width=1.5, annotation_text=f"▼ 손절가: {stop_price:,.0f}", row=1, col=1)
 fig.add_vline(x=selected_date, line_width=2, line_dash="dot", line_color="#8b5cf6", row=1, col=1)
 
-fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#8b5cf6', width=1.8), name="RSI"), row=2, col=1)
-fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=2, col=1)
-fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=2, col=1)
+# AI 확률 그래프
+fig.add_trace(go.Scatter(x=df.index, y=df['AI_Win_Prob'], line=dict(color='#2563eb', width=1.8), name="AI 상승 확률"), row=2, col=1)
+fig.add_hline(y=60, line_dash="dash", line_color="#16a34a", annotation_text="상승 우세 기준(60%)", row=2, col=1)
+fig.add_hline(y=40, line_dash="dash", line_color="#dc2626", annotation_text="하락 경계 기준(40%)", row=2, col=1)
 
-if has_supply:
-    fig.add_trace(go.Bar(x=df.index, y=df['외국인순매수'], name="외국인", marker_color="#3b82f6"), row=3, col=1)
-    fig.add_trace(go.Bar(x=df.index, y=df['기관순매수'], name="기관", marker_color="#f97316"), row=3, col=1)
+# RSI
+fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='#8b5cf6', width=1.5), name="RSI"), row=3, col=1)
+fig.add_hline(y=70, line_dash="dash", line_color="#dc2626", row=3, col=1)
+fig.add_hline(y=30, line_dash="dash", line_color="#2563eb", row=3, col=1)
 
-fig.update_xaxes(type='category', showticklabels=True, showgrid=True, gridcolor="#e2e8f0", showline=True, linewidth=1.5, linecolor="#475569", mirror=True, nticks=12)
+fig.update_xaxes(type='category', showgrid=True, gridcolor="#e2e8f0", showline=True, linewidth=1.5, linecolor="#475569", mirror=True, nticks=12)
 fig.update_yaxes(showgrid=True, gridcolor="#e2e8f0", showline=True, linewidth=1.5, linecolor="#475569", mirror=True)
-fig.update_layout(height=850 if has_supply else 680, margin=dict(l=15, r=15, t=35, b=25), xaxis_rangeslider_visible=False, plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", hovermode="x unified", legend=dict(orientation="h", y=1.03))
+fig.update_layout(height=880, margin=dict(l=15, r=15, t=35, b=25), xaxis_rangeslider_visible=False, plot_bgcolor="#ffffff", paper_bgcolor="#ffffff", hovermode="x unified", legend=dict(orientation="h", y=1.03))
 
 st.plotly_chart(fig, use_container_width=True)
 
-# 8. 투자 판단 알고리즘
-score = 50
-reasons = []
-
-if c_close > s20 and s20 > s60:
-    score += 25
-    reasons.append("주가가 20일 및 60일선 위에 안착한 **상승 정배열 추세**입니다.")
-elif c_close < s20 and s20 < s60:
-    score -= 25
-    reasons.append("주가가 이동평균선 아래로 내려앉은 **하락 추세**입니다.")
+# 7. AI 분석 판정
+if ai_prob >= 65:
+    ai_verdict = "🟢 AI 적극 매수 제안 (STRONG BUY)"
+    ai_banner = "banner-strong-buy"
+    ai_action = f"과거 5년치 패턴 학습 결과, 현재와 유사한 환경에서 20영업일 내 주가가 유의미하게 상승할 확률은 <b>{ai_prob:.1f}%</b>로 매우 높습니다. 분할 매수 진입을 적극 검토할 구간입니다."
+elif ai_prob >= 50:
+    ai_verdict = "🟢 AI 분할 매수 고려 (BUY)"
+    ai_banner = "banner-buy"
+    ai_action = f"상승 우세 확률(<b>{ai_prob:.1f}%</b>)을 보이고 있습니다. 지지선 이탈 여부를 확인하며 보수적 분할 매수가 유효합니다."
+elif ai_prob <= 35:
+    ai_verdict = "🔴 AI 비중 축소 / 손절 권고 (SELL)"
+    ai_banner = "banner-sell"
+    ai_action = f"상승 확률이 <b>{ai_prob:.1f}%</b>에 불과하여 과거 통계상 하방 압력이 훨씬 컸던 구간입니다. 현금 확보 및 리스크 관리가 시급합니다."
 else:
-    reasons.append("방향성을 탐색하는 **박스권 횡보 구간**입니다.")
+    ai_verdict = "🟡 AI 매매 보류 / 관망 (HOLD)"
+    ai_banner = "banner-hold"
+    ai_action = f"상승 확률 <b>{ai_prob:.1f}%</b>로 상승과 하락 모멘텀이 팽팽합니다. 방향성이 확정될 때까지 진입을 유보하세요."
 
-if rsi <= 35:
-    score += 15
-    reasons.append(f"RSI 수치가 **{rsi:.1f}**로 과매도(바닥권) 영역에 있어 기술적 반등 확률이 높습니다.")
-elif rsi >= 70:
-    score -= 15
-    reasons.append(f"RSI 수치가 **{rsi:.1f}**로 과열권에 진입해 단기 차익 실현 매물 출회에 유의해야 합니다.")
-else:
-    reasons.append(f"RSI는 **{rsi:.1f}**로 심리적 과열/침체 없이 안정적입니다.")
-
-if has_supply:
-    f_net = target_row.get('외국인순매수', 0)
-    i_net = target_row.get('기관순매수', 0)
-    if f_net > 0 and i_net > 0:
-        score += 20
-        reasons.append(f"**외국인(+{f_net:,.0f}주)과 기관(+{i_net:,.0f}주)의 쌍끌이 순매수**가 유입되었습니다.")
-    elif f_net < 0 and i_net < 0:
-        score -= 20
-        reasons.append(f"**외국인({f_net:,.0f}주)과 기관({i_net:,.0f}주)의 동반 순매도**로 매물 부담이 큽니다.")
-    elif f_net > 0:
-        score += 10
-        reasons.append(f"**외국인이 +{f_net:,.0f}주 순매수**하며 하방을 방어 중입니다.")
-    elif i_net > 0:
-        score += 10
-        reasons.append(f"**기관이 +{i_net:,.0f}주 순매수**로 방어선을 구축 중입니다.")
-
-if score >= 75:
-    verdict = "🟢 강력 매수 (STRONG BUY)"
-    b_class = "banner-strong-buy"
-    action = "추세, 심리, 수급이 일치합니다. 매수 진입 또는 비중 확대를 적극 검토하세요."
-elif score >= 60:
-    verdict = "🟢 매수 고려 (BUY)"
-    b_class = "banner-buy"
-    action = "상승 모멘텀이 유효합니다. 지지선 확인 후 분할 매수를 검토할 수 있습니다."
-elif score <= 35:
-    verdict = "🔴 적극 매도 / 손절 (SELL)"
-    b_class = "banner-sell"
-    action = "추세 붕괴 및 수급 이탈이 겹쳤습니다. 현금 확보 및 손절을 권장합니다."
-else:
-    verdict = "🟡 매매 보류 / 관망 (HOLD)"
-    b_class = "banner-hold"
-    action = "방향성이 뚜렷하지 않은 혼조세입니다. 명확한 돌파 전까지 신규 진입을 멈추고 관망하세요."
-
-# 9. 결과 출력
+# 8. 결과 렌더링
 st.markdown("---")
-st.markdown(f"## 🔍 [{target_date_formatted}] 종합 투자 판단 및 매매 기준 가격")
+st.markdown(f"## 🤖 [{target_date_formatted}] 머신러닝 AI 진단 결과")
 
 st.markdown(f"""
-<div class="signal-banner {b_class}">
-    <div style="font-size: 1.25rem;">{verdict} (모멘텀 점수: {score}점/100점)</div>
-    <div style="margin-top: 4px; font-weight: normal;">{action}</div>
+<div class="signal-banner {ai_banner}">
+    <div style="font-size: 1.3rem;">{ai_verdict} (AI 산출 상승 확률: {ai_prob:.1f}%)</div>
+    <div style="margin-top: 5px; font-weight: normal; line-height: 1.6;">{ai_action}</div>
 </div>
 """, unsafe_allow_html=True)
 
+# 가격 가이드라인
 fmt = "{:,.0f}" if is_korean else "{:,.2f}"
-
-st.markdown(f"### 🎯 [{target_date_formatted}] 기준 실전 매매 가격 가이드라인")
+st.markdown(f"### 🎯 [{target_date_formatted}] AI 추천 매매 기준 가격")
 c1, c2, c3 = st.columns(3)
+
+target_profit = buy_price * 1.08
 
 with c1:
     st.markdown(f"""
     <div class="price-box" style="border-top: 4px solid #16a34a;">
         <div style="color: #16a34a; font-weight: bold; font-size: 0.95rem;">🟢 추천 매수 기준가</div>
         <div style="font-size: 1.5rem; font-weight: bold; color: #16a34a; margin: 6px 0;">{fmt.format(buy_price)} {unit}</div>
-        <div style="font-size: 0.8rem; color: #64748b;">20일 최고 저항선 상향 돌파 시 추가 매수</div>
-    </div>
-    """, unsafe_allow_html=True)
+        <div style="font-size: 0.8rem; color: #64748b;">20일 최고 저항선 상향 돌파 시</div>
+    </div>""", unsafe_allow_html=True)
 
 with c2:
     st.markdown(f"""
-    <div class="price-box" style="border-top: 4px solid #d97706;">
-        <div style="color: #d97706; font-weight: bold; font-size: 0.95rem;">🟡 매매 보류 / 관망 구간</div>
-        <div style="font-size: 1.3rem; font-weight: bold; color: #d97706; margin: 8px 0;">
-            {fmt.format(stop_price)} ~ {fmt.format(buy_price)} {unit}
-        </div>
-        <div style="font-size: 0.8rem; color: #64748b;">박스권 내에서는 신규 매매 없이 보유 포지션 유지</div>
-    </div>
-    """, unsafe_allow_html=True)
+    <div class="price-box" style="border-top: 4px solid #2563eb;">
+        <div style="color: #2563eb; font-weight: bold; font-size: 0.95rem;">🎯 AI 1차 목표가 (익절선)</div>
+        <div style="font-size: 1.5rem; font-weight: bold; color: #2563eb; margin: 6px 0;">{fmt.format(target_profit)} {unit}</div>
+        <div style="font-size: 0.8rem; color: #64748b;">돌파 성공 시 1차 단기 차익 실현선 (+8%)</div>
+    </div>""", unsafe_allow_html=True)
 
 with c3:
     st.markdown(f"""
     <div class="price-box" style="border-top: 4px solid #dc2626;">
-        <div style="color: #dc2626; font-weight: bold; font-size: 0.95rem;">🔴 추천 매도 / 손절가</div>
+        <div style="color: #dc2626; font-weight: bold; font-size: 0.95rem;">🔴 리스크 방어선 (손절가)</div>
         <div style="font-size: 1.5rem; font-weight: bold; color: #dc2626; margin: 6px 0;">{fmt.format(stop_price)} {unit}</div>
-        <div style="font-size: 0.8rem; color: #64748b;">20일 최저 지지선 하향 이탈 시 전량 손절/매도</div>
-    </div>
-    """, unsafe_allow_html=True)
+        <div style="font-size: 0.8rem; color: #64748b;">20일 최저 지지선 하향 이탈 시 전량 손절</div>
+    </div>""", unsafe_allow_html=True)
 
-# 통계 백테스트
-stats = find_similar_patterns_outcome(df, selected_date, has_supply)
-if stats and stats['count'] > 0:
-    st.markdown(f"### 📊 과거 동일 조건 발생 시 실측 통계 ({selected_period.upper()} 데이터 기준)")
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        st.markdown(f"""<div class="metric-box">
-            <div style="color: #64748b; font-size: 0.85rem;">동일 패턴 발생 횟수</div>
-            <div style="font-size: 1.4rem; font-weight: bold; margin-top: 4px;">{stats['count']} 회</div>
+# 모델이 중요하게 판단한 피처 가중치 표시
+st.markdown("### 🧠 AI가 이번 판단에서 가장 중요하게 반영한 지표 TOP 3")
+sorted_weights = sorted(feature_weights.items(), key=lambda x: x[1], reverse=True)[:3]
+w1, w2, w3 = st.columns(3)
+for col, (f_name, weight) in zip([w1, w2, w3], sorted_weights):
+    with col:
+        st.markdown(f"""
+        <div class="metric-box">
+            <div style="color: #64748b; font-size: 0.85rem;">중요 지표: {f_name}</div>
+            <div style="font-size: 1.3rem; font-weight: bold; color: #1e40af; margin-top: 4px;">{weight*100:.1f}% 영향도</div>
         </div>""", unsafe_allow_html=True)
-    with s2:
-        w_col = "#16a34a" if stats['win_rate'] >= 60 else ("#dc2626" if stats['win_rate'] <= 40 else "#d97706")
-        st.markdown(f"""<div class="metric-box">
-            <div style="color: #64748b; font-size: 0.85rem;">20영업일 뒤 상승 확률(승률)</div>
-            <div style="font-size: 1.4rem; font-weight: bold; color: {w_col}; margin-top: 4px;">{stats['win_rate']:.1f}%</div>
-        </div>""", unsafe_allow_html=True)
-    with s3:
-        r_col = "#16a34a" if stats['avg_return'] > 0 else "#dc2626"
-        st.markdown(f"""<div class="metric-box">
-            <div style="color: #64748b; font-size: 0.85rem;">1개월 뒤 평균 실측 수익률</div>
-            <div style="font-size: 1.4rem; font-weight: bold; color: {r_col}; margin-top: 4px;">{stats['avg_return']:+.2f}%</div>
-        </div>""", unsafe_allow_html=True)
-
-# 브리핑 요약
-st.markdown("### 📝 AI 시황 브리핑 요약")
-briefing_body = "<br>".join([f"• {r}" for r in reasons])
-st.markdown(f"""
-<div class="briefing-box">
-    <b>[{target_date_formatted} 진단]</b><br>
-    {briefing_body}
-</div>
-""", unsafe_allow_html=True)
